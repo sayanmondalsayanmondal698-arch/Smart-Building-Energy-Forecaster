@@ -1,4 +1,6 @@
 
+import logging
+
 from django.shortcuts import render
 
 from .services.prediction import generate_predictions
@@ -6,9 +8,13 @@ from .services.weather import get_hourly_weather
 from .services.anomaly import detect_energy_anomalies
 
 
+# Application logger
+logger = logging.getLogger(__name__)
+
+
 def home(request):
 
-    # Default dashboard values
+    # 1. Initialize dashboard values
     context = {
         "predictions": [],
         "weather_data": [],
@@ -25,8 +31,9 @@ def home(request):
         "anomaly_error": None,
     }
 
-    # 1. Get weather and generate energy predictions
+    # 2. Get weather and generate energy predictions
     try:
+
         weather_data = get_hourly_weather()
 
         predictions = generate_predictions(
@@ -34,6 +41,7 @@ def home(request):
             is_holiday=0
         )
 
+        # Calculate total predicted energy
         total_energy = round(
             sum(
                 item["predicted_energy"]
@@ -42,11 +50,13 @@ def home(request):
             2
         )
 
+        # Calculate average hourly energy
         average_energy = round(
             total_energy / len(predictions),
             2
         ) if predictions else 0
 
+        # Update dashboard context
         context.update({
             "predictions": predictions,
             "weather_data": weather_data,
@@ -59,18 +69,31 @@ def home(request):
         })
 
     except Exception as error:
+
+        logger.exception(
+            "Energy forecasting failed."
+        )
+
         context["weather_error"] = str(error)
 
-    # 2. Detect historical energy anomalies
+    # 3. Detect historical energy anomalies
     try:
-        anomaly_data = detect_energy_anomalies(limit=10)
+
+        anomaly_data = detect_energy_anomalies(
+            limit=10
+        )
 
         context["anomaly_data"] = anomaly_data
 
     except Exception as error:
+
+        logger.exception(
+            "HVAC anomaly detection failed."
+        )
+
         context["anomaly_error"] = str(error)
 
-    # 3. Display dashboard
+    # 4. Render the dashboard
     return render(
         request,
         "dashboard/home.html",

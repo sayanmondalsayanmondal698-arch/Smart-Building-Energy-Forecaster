@@ -1,18 +1,27 @@
-
 import json
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from django.core.cache import cache
 
-# Building location: Kolkata, West Bengal, India
+
 LATITUDE = 22.5726
 LONGITUDE = 88.3639
 TIMEZONE = "Asia/Kolkata"
 
+WEATHER_CACHE_KEY = "smart_building_weather_v1"
+WEATHER_CACHE_SECONDS = 600
+
 
 def get_hourly_weather():
+
+    # Reuse recently retrieved weather data.
+    cached_weather = cache.get(WEATHER_CACHE_KEY)
+
+    if cached_weather is not None:
+        return cached_weather
 
     params = {
         "latitude": LATITUDE,
@@ -28,18 +37,14 @@ def get_hourly_weather():
     )
 
     try:
-        # Get weather data from Open-Meteo
-        with urlopen(url, timeout=20) as response:
-            data = json.loads(
-                response.read().decode("utf-8")
-            )
+        with urlopen(url, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
 
         hourly = data["hourly"]
 
         times = hourly["time"]
         temperatures = hourly["temperature_2m"]
 
-        # Current Kolkata time (timezone-naive for comparison)
         now = datetime.now(
             ZoneInfo(TIMEZONE)
         ).replace(
@@ -51,12 +56,14 @@ def get_hourly_weather():
 
         weather_data = []
 
-        # Collect the next 24 hourly temperatures
         for timestamp, temperature in zip(times, temperatures):
 
             forecast_time = datetime.fromisoformat(timestamp)
 
             if forecast_time >= now:
+
+                if temperature is None:
+                    continue
 
                 weather_data.append({
                     "timestamp": timestamp,
@@ -66,16 +73,20 @@ def get_hourly_weather():
             if len(weather_data) == 24:
                 break
 
-        # Ensure exactly 24 records are available
         if len(weather_data) != 24:
             raise ValueError(
                 "Could not retrieve 24 hourly temperatures."
             )
 
+        cache.set(
+            WEATHER_CACHE_KEY,
+            weather_data,
+            WEATHER_CACHE_SECONDS
+        )
+
         return weather_data
 
     except Exception as error:
-
         raise RuntimeError(
             f"Weather API error: {error}"
         ) from error
