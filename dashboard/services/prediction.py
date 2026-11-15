@@ -1,6 +1,8 @@
 
 from pathlib import Path
 from functools import lru_cache
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import math
 
 import joblib
@@ -16,8 +18,10 @@ MODEL_DIR = BASE_DIR / "ml_models"
 # Historical energy dataset
 DATA_PATH = BASE_DIR / "data" / "building_energy.csv"
 
+TIMEZONE = "Asia/Kolkata"
 
-# Load the trained Random Forest model once
+
+# Load trained Random Forest model once
 model = joblib.load(
     MODEL_DIR / "energy_forecasting_model.pkl"
 )
@@ -27,7 +31,7 @@ features = joblib.load(
     MODEL_DIR / "model_features.pkl"
 )
 
-# Check model features once during startup
+# Validate model features
 required_model_features = {
     "temperature",
     "is_holiday",
@@ -54,10 +58,9 @@ if missing_model_features:
 
 
 @lru_cache(maxsize=1)
-def load_historical_energy():
+def load_historical_data():
     """
-    Load historical energy readings once per server process.
-    Cache the readings to avoid repeatedly reading the CSV.
+    Load historical temperature and energy readings once.
     """
 
     if not DATA_PATH.exists():
@@ -67,11 +70,20 @@ def load_historical_energy():
 
     df = pd.read_csv(
         DATA_PATH,
-        usecols=["timestamp", "kw_consumed"]
+        usecols=[
+            "timestamp",
+            "temperature",
+            "kw_consumed"
+        ]
     )
 
     df["timestamp"] = pd.to_datetime(
         df["timestamp"],
+        errors="coerce"
+    )
+
+    df["temperature"] = pd.to_numeric(
+        df["temperature"],
         errors="coerce"
     )
 
@@ -84,18 +96,104 @@ def load_historical_energy():
         subset=["timestamp", "kw_consumed"]
     )
 
-    df = df.sort_values("timestamp")
+    df = df.sort_values("timestamp").reset_index(drop=True)
 
-    history = tuple(
-        df["kw_consumed"].astype(float).tolist()
-    )
-
-    if len(history) < 168:
+    if len(df) < 168:
         raise ValueError(
             "At least 168 historical hourly records are required."
         )
 
-    return history
+    return df
+
+
+def load_historical_energy():
+    """
+    Return historical electricity readings.
+    """
+
+    df = load_historical_data()
+
+    return tuple(
+        df["kw_consumed"].astype(float).tolist()
+    )
+
+
+def generate_fallback_weather():
+    """
+    Estimate the next 24 hourly temperatures
+    using historical temperature patterns.
+
+    These are estimates, NOT live weather forecasts.
+    """
+
+    df = load_historical_data()
+
+    temperature_data = df.dropna(
+        subset=["temperature"]
+    ).copy()
+
+    if temperature_data.empty:
+        raise ValueError(
+            "No historical temperature data is available."
+        )
+
+    # Use the latest 30 days available in the dataset.
+    latest_timestamp = temperature_data["timestamp"].max()
+
+    start_timestamp = (
+        latest_timestamp - pd.Timedelta(days=30)
+    )
+
+    recent_data = temperature_data[
+        temperature_data["timestamp"] >= start_timestamp
+    ]
+
+    if recent_data.empty:
+        recent_data = temperature_data
+
+    # Calculate typical temperature for each hour.
+    hourly_temperatures = (
+        recent_data.groupby(
+            recent_data["timestamp"].dt.hour
+        )["temperature"].mean()
+    )
+
+    overall_temperature = float(
+        recent_data["temperature"].mean()
+    )
+
+    if not math.isfinite(overall_temperature):
+        raise ValueError(
+            "Historical temperature average is invalid."
+        )
+
+    # Current Kolkata time, rounded to the hour.
+    now = datetime.now(
+        ZoneInfo(TIMEZONE)
+    ).replace(
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=None
+    )
+
+    fallback_data = []
+
+    for i in range(24):
+
+        forecast_time = now + timedelta(hours=i)
+
+        temperature = hourly_temperatures.get(
+            forecast_time.hour,
+            overall_temperature
+        )
+
+        fallback_data.append({
+            "timestamp": forecast_time.isoformat(),
+            "temperature": float(temperature)
+        })
+
+    return fallback_data
 
 
 def generate_predictions(weather_data, is_holiday=0):
@@ -104,7 +202,6 @@ def generate_predictions(weather_data, is_holiday=0):
     using the trained Random Forest model.
     """
 
-    # Validate weather input
     if not isinstance(weather_data, (list, tuple)):
         raise ValueError(
             "Weather data must be a list of hourly records."
@@ -115,7 +212,6 @@ def generate_predictions(weather_data, is_holiday=0):
             "Please provide exactly 24 hourly weather records."
         )
 
-    # Validate holiday input
     try:
         is_holiday = int(is_holiday)
     except (TypeError, ValueError):
@@ -128,12 +224,10 @@ def generate_predictions(weather_data, is_holiday=0):
             "Holiday value must be 0 or 1."
         )
 
-    # Get cached historical readings
     history = list(load_historical_energy())
 
     predictions = []
 
-    # Generate the next 24 hourly predictions
     for item in weather_data:
 
         if not isinstance(item, dict):
@@ -163,13 +257,13 @@ def generate_predictions(weather_data, is_holiday=0):
 
         if not math.isfinite(temperature):
             raise ValueError(
-                "Weather temperature must be a finite number."
+                "Weather temperature must be finite."
             )
 
         hour = timestamp.hour
         day_of_week = timestamp.dayofweek
 
-        # Prepare model input features
+        # Prepare model input features.
         row = {
             "temperature": temperature,
             "is_holiday": is_holiday,
@@ -184,18 +278,16 @@ def generate_predictions(weather_data, is_holiday=0):
             "rolling_168": sum(history[-168:]) / 168,
         }
 
-        # Maintain the original model feature order
+        # Maintain original model feature order.
         input_df = pd.DataFrame(
             [[row[column] for column in features]],
             columns=features
         )
 
-        # Generate energy prediction
         prediction = float(
             model.predict(input_df)[0]
         )
 
-        # Prevent negative or invalid predictions
         if not math.isfinite(prediction):
             raise ValueError(
                 "The model generated an invalid prediction."
@@ -203,7 +295,6 @@ def generate_predictions(weather_data, is_holiday=0):
 
         prediction = max(0, prediction)
 
-        # Store prediction result
         predictions.append({
             "timestamp": timestamp.strftime(
                 "%Y-%m-%d %H:%M"
@@ -213,7 +304,7 @@ def generate_predictions(weather_data, is_holiday=0):
             "predicted_energy": round(prediction, 2)
         })
 
-        # Add prediction to history for recursive forecasting
+        # Recursive forecasting.
         history.append(prediction)
 
     return predictions
