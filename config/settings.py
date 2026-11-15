@@ -89,6 +89,18 @@ DATABASES = {
     }
 }
 
+# Shared Django database cache
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+        "LOCATION": "weather_cache_table",
+        "TIMEOUT": 600,
+        "OPTIONS": {
+            "MAX_ENTRIES": 1000
+        }
+    }
+}
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {
